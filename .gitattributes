@@ -1,0 +1,7 @@
+# 统一文本换行，避免跨电脑提交产生无关变化。
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+*.ps1 text eol=crlf

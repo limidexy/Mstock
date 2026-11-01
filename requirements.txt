@@ -1,0 +1,13 @@
+# -*- coding: utf-8 -*-
+pandas
+numpy<2
+yfinance
+requests
+PyYAML
+matplotlib
+pytest
+jinja2
+tqdm
+python-dotenv
+# 同花顺公开网页表格的解析依赖。
+lxml
