@@ -12,6 +12,8 @@ Mstock 是一个全中文的美股 / ETF 主升浪突破相似票筛选与复盘
 
 迁移请先读 [迁移交接资料](docs/MIGRATION_HANDOFF.md) 和 [开发接续说明](docs/PROJECT_CONTINUATION.md)。GitHub 只保存安全源码与模板，行情、人工校对及历史输出须另行恢复。
 
+公开源码仓库：[limidexy/Mstock](https://github.com/limidexy/Mstock)。真实行情缓存、私人校对、迁移备份和真实环境变量不随仓库发布；首次克隆后没有历史数据属于预期状态，测试使用独立模拟样本。
+
 ## 系统边界
 
 - 只做候选票筛选和复盘辅助。

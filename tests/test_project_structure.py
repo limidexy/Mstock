@@ -1,4 +1,5 @@
 from pathlib import Path
+import configparser
 import re
 
 
@@ -11,6 +12,7 @@ def test_project_structure_exists():
         "AGENTS.md",
         "README.md",
         "requirements.txt",
+        "pytest.ini",
         ".gitignore",
         ".env.example",
         "docs/策略说明.md",
@@ -126,3 +128,11 @@ def test_core_utils_modules_can_be_imported():
 
     assert chinese.get_candidate_fields()
     assert logger.get_logger("Mstock测试日志")
+
+
+def test_pytest_only_collects_official_tests():
+    """默认测试不递归收集保留的私人迁移演练副本。"""
+    settings = configparser.ConfigParser()
+    settings.read(项目根目录 / "pytest.ini", encoding="utf-8")
+    assert settings["pytest"]["testpaths"].split() == ["tests"]
+    assert "migration_private" in settings["pytest"]["norecursedirs"].split()
