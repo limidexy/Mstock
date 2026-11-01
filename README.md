@@ -35,7 +35,7 @@ tests/     基础测试
 
 使用64位 Python 3.12，不使用系统默认 Python 3.14。依赖锁定文件是本次迁移验证环境快照，不是无法考证的原始环境快照。
 
-```bash
+```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-windows-lock.txt
 .\.venv\Scripts\python.exe -m pytest
