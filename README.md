@@ -33,6 +33,10 @@ scripts/   中文命令脚本入口
 tests/     基础测试
 ```
 
+## 云端源码验收
+
+旧电脑不在身边时，可直接在 [GitHub Actions 云端源码验收](https://github.com/limidexy/Mstock/actions/workflows/cloud-check.yml) 点击“运行工作流”（Run workflow）。使用隔离模拟数据验证依赖、编译和全部测试，不需要项目密钥；不会恢复私人历史数据或生成最新真实候选。操作和范围见 [云端使用说明](docs/CLOUD_USAGE.md)。
+
 ## Windows 环境与测试
 
 使用64位 Python 3.12，不使用系统默认 Python 3.14。依赖锁定文件是本次迁移验证环境快照，不是无法考证的原始环境快照。
