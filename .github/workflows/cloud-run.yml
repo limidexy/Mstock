@@ -13,11 +13,6 @@ on:
         required: true
         type: string
         default: "AA,AAPL,NBIS,MSFT,NVDA,AMD,TSLA,META"
-  # 仅用于本次用户授权的首次接通，验收完成后移除推送触发。
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/cloud-run.yml"
 
 permissions:
   contents: read
@@ -38,7 +33,7 @@ jobs:
       PYTHONUTF8: "1"
       MPLBACKEND: Agg
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      MSTOCK_RUN_ALLOW_NETWORK: ${{ github.event_name == 'push' || inputs.allow_network }}
+      MSTOCK_RUN_ALLOW_NETWORK: ${{ inputs.allow_network }}
       MSTOCK_RUN_TICKERS: ${{ inputs.tickers || 'AA,AAPL,NBIS,MSFT,NVDA,AMD,TSLA,META' }}
     steps:
       - name: 确认本轮联网授权
