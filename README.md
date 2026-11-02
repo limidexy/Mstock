@@ -33,9 +33,11 @@ scripts/   中文命令脚本入口
 tests/     基础测试
 ```
 
-## 云端源码验收
+## 云端运行
 
-旧电脑不在身边时，可直接在 [GitHub Actions 云端源码验收](https://github.com/limidexy/Mstock/actions/workflows/cloud-check.yml) 点击“运行工作流”（Run workflow）。使用隔离模拟数据验证依赖、编译和全部测试，不需要项目密钥；不会恢复私人历史数据或生成最新真实候选。操作和范围见 [云端使用说明](docs/CLOUD_USAGE.md)。
+旧电脑不在身边时，打开 [云端小批量选票](https://github.com/limidexy/Mstock/actions/workflows/cloud-run.yml)，点击“运行工作流”（Run workflow），勾选允许本轮获取公开日线行情。完成后下载该次运行的 `Mstock-report`，解压并打开 `index.html`。默认8只指定股票加QQQ/SPY基准，只用于小批量运行，报告标明实际数据日期和覆盖范围。
+
+仅检查代码时使用 [云端源码验收](https://github.com/limidexy/Mstock/actions/workflows/cloud-check.yml)，该入口不下载真实行情。两个入口均不会恢复旧电脑私人历史数据。具体操作和范围见 [云端使用说明](docs/CLOUD_USAGE.md)。
 
 ## Windows 环境与测试
 
