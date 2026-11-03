@@ -1,0 +1,55 @@
+name: 存储股多样本验证
+
+on:
+  pull_request:
+    paths:
+      - research/memory_validation/**
+      - .github/workflows/memory-validation.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-validation-${{ github.head_ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 先固定协议再检验公开历史
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'research/memory-wave-validation-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      MSTOCK_RESEARCH_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: 获取独立研究分支
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: 安装研究运行环境
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12.4"
+      - name: 先验证离线执行边界
+        run: python research/memory_validation/validate.py --self-test
+      - name: 安装固定行情读取版本
+        run: python -m pip install yfinance==1.4.1 pandas==2.2.3 numpy==1.26.4
+      - name: 本轮明确读取公开历史并检验
+        run: python research/memory_validation/validate.py --allow-network --output-dir "${RUNNER_TEMP}/memory-validation"
+      - name: 写入中文验证摘要
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/memory-validation/reports/验证摘要.md" ]; then
+            cat "${RUNNER_TEMP}/memory-validation/reports/验证摘要.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+      - name: 保存派生验证报告
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: 存储股多样本验证
+          path: ${{ runner.temp }}/memory-validation/reports/
+          retention-days: 7
+          if-no-files-found: warn
