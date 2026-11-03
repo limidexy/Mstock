@@ -50,8 +50,9 @@ def check_bars(bars):
         seen.add(b["date"])
         if not all(math.isfinite(b[k]) and b[k] > 0 for k in ("o", "h", "l", "c")):
             raise ValueError("发现非正价格或无效数字：" + b["date"])
-        if b["l"] > min(b["o"], b["c"]) + 1e-7 or b["h"] < max(b["o"], b["c"]) - 1e-7:
-            raise ValueError("日线高低区间不包容开收盘：" + b["date"])
+        tolerance = max(b[k] for k in ("o", "h", "l", "c"))*1e-7
+        if b["l"] > min(b["o"], b["c"]) + tolerance or b["h"] < max(b["o"], b["c"]) - tolerance:
+            raise ValueError("日线高低区间不包容开收盘：" + json.dumps(b, ensure_ascii=False))
     if bars != sorted(bars, key=lambda b: b["date"]):
         raise ValueError("日期顺序无效")
 
@@ -197,7 +198,7 @@ def monthly_blocks(trades, protocol, extra_cost=0):
 
 def accepted(summary, stress, calibrated, protocol):
     if not calibrated:
-        return "历史不足以完成训练和验证，预设基线仅供探索"
+        return "没有通过训练验证筛选的候选，预设基线仅供探索"
     if summary["完成次数"] < protocol["单标的留出段最低完成次数"]:
         return "留出段样本不足，不能认定达到80%"
     block_interval = summary.get("月份区块胜率95%区间")
@@ -230,7 +231,8 @@ def analyze_asset(asset, bars, protocol):
         groups[regime] = stats({"trades": subset, "curve": [], "open": 0})
     # 成本压力检查只重估同一组固定模拟记录的净收益，不把基础资金曲线回撤冒充压力回撤。
     stress.pop("收盘盯市最大回撤", None)
-    result = {**asset, "原始样本数": len(bars), "样本起点": bars[0]["date"], "样本终点": bars[-1]["date"], "训练验证合格候选数": len(eligible), "选定参数": chosen, "成本假设": cost, "留出区间": [start, end], "留出结果": summary, "成本加倍结果": stress, "分环境结果": groups, "状态": accepted(summary, stress, bool(eligible), protocol), "候选训练验证记录": candidates}
+    diagnostics = {"训练次数达标候选数": sum(c["训练"]["完成次数"] >= protocol["最低训练次数"] for c in candidates), "验证次数达标候选数": sum(c["验证"]["完成次数"] >= protocol["最低验证次数"] for c in candidates), "两段次数均达标候选数": sum(c["训练"]["完成次数"] >= protocol["最低训练次数"] and c["验证"]["完成次数"] >= protocol["最低验证次数"] for c in candidates), "样本覆盖训练验证区间": bars[0]["date"] <= protocol["训练区间"][1] and bars[-1]["date"] >= protocol["验证区间"][0]}
+    result = {**asset, "原始样本数": len(bars), "样本起点": bars[0]["date"], "样本终点": bars[-1]["date"], "训练验证合格候选数": len(eligible), "筛选诊断": diagnostics, "选定参数": chosen, "成本假设": cost, "留出区间": [start, end], "留出结果": summary, "成本加倍结果": stress, "分环境结果": groups, "状态": accepted(summary, stress, bool(eligible), protocol), "候选训练验证记录": candidates}
     return result, sim
 
 
@@ -253,12 +255,21 @@ def get_data(asset, protocol, raw_directory):
     if "Adj Close" not in frame:
         raise ValueError("数据源缺少复权字段，未自行猜测复权")
     cutoff = protocol["美国完整日期上限"] if asset["美国市场"] else protocol["亚洲完整日期上限"]
-    bars, raw, excluded = [], [], 0
+    bars, raw, excluded, pending_tail = [], [], 0, []
+    selected_rows = []
     for index, row in frame.iterrows():
         date = index.date().isoformat()
         if date > cutoff or date < asset.get("最早日期", protocol["数据请求起点"]):
             excluded += 1
             continue
+        selected_rows.append((date, row))
+    def valid_adjusted(row):
+        value = float(row["Adj Close"])
+        return math.isfinite(value) and value > 0
+    # 仅隔离尾部尚未就绪的复权字段，不补值；中间任何无效记录仍然失败。
+    while selected_rows and not valid_adjusted(selected_rows[-1][1]):
+        pending_tail.append(selected_rows.pop()[0]); excluded += 1
+    for date, row in selected_rows:
         values = {k: float(row[col]) for k, col in (("o", "Open"), ("h", "High"), ("l", "Low"), ("c", "Close"))}
         adj = float(row["Adj Close"])
         if not math.isfinite(adj) or adj <= 0 or values["c"] <= 0:
@@ -276,7 +287,8 @@ def get_data(asset, protocol, raw_directory):
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(raw[0]))
         writer.writeheader(); writer.writerows(raw)
-    audit = {"来源": "Yahoo Finance公开行情，经yfinance读取", "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "复权口径": "OHLC乘以复权收盘价除以名义收盘价，包含分红调整；非真实账户现金记账", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
+    precision_count = sum(b["l"] > min(b["o"], b["c"]) or b["h"] < max(b["o"], b["c"]) for b in bars)
+    audit = {"来源": "Yahoo Finance公开行情，经yfinance读取", "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "尾部复权字段未就绪而隔离的日期": pending_tail, "微小价格精度差行数": precision_count, "精度容差": "仅容许相对价格一千万分之一的浮点误差，未改写OHLC；超限继续失败", "复权口径": "OHLC乘以复权收盘价除以名义收盘价，包含分红调整；非真实账户现金记账", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
     return bars, audit
 
 
@@ -297,6 +309,12 @@ def markdown_report(report):
 
 def self_test():
     assert .70 < wilson(80, 100)[0] < .72
+    check_bars([{"date": "2020-01-01", "o": 99980, "h": 100000, "l": 99950, "c": 100000.0001}])
+    try:
+        check_bars([{"date": "2020-01-01", "o": 99980, "h": 100000, "l": 99950, "c": 100005}])
+        raise AssertionError("真实超限异常不应被容差放过")
+    except ValueError:
+        pass
     assert wilson(8, 10)[0] < wilson(80, 100)[0]
     p = {"entry": 100, "stop": 95, "target": 110, "index": 0}
     assert exit_on_bar(p, {"o": 100, "h": 112, "l": 94, "c": 106}, 0, 20) == (95, "风险边界")
