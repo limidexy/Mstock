@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import re
 from pathlib import Path
 import statistics
 import sys
@@ -57,6 +58,16 @@ def check_bars(bars):
             raise ValueError("日线高低区间不包容开收盘：" + json.dumps(b, ensure_ascii=False))
     if bars != sorted(bars, key=lambda b: b["date"]):
         raise ValueError("日期顺序无效")
+
+
+def parse_xml_bytes(payload):
+    match = re.search(br'encoding=["\x27]([^"\x27]+)["\x27]', payload[:200], re.I)
+    encoding = match.group(1).decode('ascii').lower() if match else 'utf-8'
+    if encoding in ('euc-kr', 'ks_c_5601-1987', 'cp949'):
+        encoding = 'cp949'
+    text = payload.decode(encoding)
+    text = re.sub(r'^\s*<\?xml[^>]*\?>', '', text)
+    return ET.fromstring(text)
 
 
 def wave_points(bars, span, min_move):
@@ -255,7 +266,7 @@ def get_data(asset, protocol, raw_directory):
     if frame is None or frame.empty:
         raise ValueError("行情源未返回历史；不以短样本或模拟值补齐")
     cutoff = protocol["美国完整日期上限"] if asset["美国市场"] else protocol["亚洲完整日期上限"]
-    bars, raw, excluded, pending_tail = [], [], 0, []
+    bars, raw, excluded, pending_tail, pending_prices = [], [], 0, [], []
     selected_rows = []
     for index, row in frame.iterrows():
         date = index.date().isoformat()
@@ -263,6 +274,14 @@ def get_data(asset, protocol, raw_directory):
             excluded += 1
             continue
         selected_rows.append((date, row))
+    def valid_price_row(row):
+        try:
+            return all(math.isfinite(float(row[k])) and float(row[k]) > 0 for k in ('Open', 'High', 'Low', 'Close'))
+        except (TypeError, ValueError):
+            return False
+    # 尾部行情缺失只隔离并披露实际终点，不以其他报价补值；中途仍按失败处理。
+    while selected_rows and not valid_price_row(selected_rows[-1][1]):
+        pending_prices.append(selected_rows.pop()[0]); excluded += 1
     for date, row in selected_rows:
         values = {k: float(row[col]) for k, col in (("o", "Open"), ("h", "High"), ("l", "Low"), ("c", "Close"))}
         adj = float(row.get("Adj Close", float("nan")))
@@ -280,7 +299,7 @@ def get_data(asset, protocol, raw_directory):
         url = "https://fchart.stock.naver.com/sise.nhn?symbol="+code+"&timeframe=day&count=1800&requestType=0"
         request = Request(url, headers={"User-Agent": "MstockResearch/1.0"})
         payload = urlopen(request, timeout=30).read()
-        root = ET.fromstring(payload)
+        root = parse_xml_bytes(payload)
         local_bars = []
         for item in root.iter('item'):
             fields = item.attrib.get('data', '').split('|')
@@ -316,7 +335,7 @@ def get_data(asset, protocol, raw_directory):
     with used_path.open("w",encoding="utf-8",newline="") as f:
         writer=csv.DictWriter(f,fieldnames=['date','o','h','l','c']);writer.writeheader();writer.writerows(bars)
     precision_count = sum(b["l"] > min(b["o"], b["c"]) or b["h"] < max(b["o"], b["c"]) for b in bars)
-    audit = {"来源": source, "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "实际分析输入SHA256": hashlib.sha256(used_path.read_bytes()).hexdigest(), "备用源对照": comparison, "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "未使用的分红复权字段异常日期": pending_tail, "微小价格精度差行数": precision_count, "精度容差": "相对价格一千万分之一；实际OHLC保留六位小数，超限继续失败", "收益口径": "同一来源OHLC的价格收益，不计现金分红和汇率损益；不同于前两轮分红再投复权结果，禁止混用", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
+    audit = {"来源": source, "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "实际分析输入SHA256": hashlib.sha256(used_path.read_bytes()).hexdigest(), "备用源对照": comparison, "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "尾部OHLC未就绪而隔离的日期": pending_prices, "未使用的分红复权字段异常日期": pending_tail, "微小价格精度差行数": precision_count, "精度容差": "相对价格一千万分之一；实际OHLC保留六位小数，超限继续失败", "收益口径": "同一来源OHLC的价格收益，不计现金分红和汇率损益；不同于前两轮分红再投复权结果，禁止混用", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
     return bars, audit
 
 
@@ -336,6 +355,8 @@ def markdown_report(report):
 
 
 def self_test():
+    xml = '<?xml version="1.0" encoding="euc-kr"?><chartdata name="삼성전자"><item data="20260101|1|2|1|2|100"/></chartdata>'.encode('cp949')
+    assert parse_xml_bytes(xml).attrib['name'] == '삼성전자'
     assert .70 < wilson(80, 100)[0] < .72
     check_bars([{"date": "2020-01-01", "o": 99980, "h": 100000, "l": 99950, "c": 100000.0001}])
     try:
