@@ -14,6 +14,8 @@ from pathlib import Path
 import statistics
 import sys
 import time
+from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = [
@@ -252,8 +254,6 @@ def get_data(asset, protocol, raw_directory):
             time.sleep(2)
     if frame is None or frame.empty:
         raise ValueError("行情源未返回历史；不以短样本或模拟值补齐")
-    if "Adj Close" not in frame:
-        raise ValueError("数据源缺少复权字段，未自行猜测复权")
     cutoff = protocol["美国完整日期上限"] if asset["美国市场"] else protocol["亚洲完整日期上限"]
     bars, raw, excluded, pending_tail = [], [], 0, []
     selected_rows = []
@@ -263,20 +263,45 @@ def get_data(asset, protocol, raw_directory):
             excluded += 1
             continue
         selected_rows.append((date, row))
-    def valid_adjusted(row):
-        value = float(row["Adj Close"])
-        return math.isfinite(value) and value > 0
-    # 仅隔离尾部尚未就绪的复权字段，不补值；中间任何无效记录仍然失败。
-    while selected_rows and not valid_adjusted(selected_rows[-1][1]):
-        pending_tail.append(selected_rows.pop()[0]); excluded += 1
     for date, row in selected_rows:
         values = {k: float(row[col]) for k, col in (("o", "Open"), ("h", "High"), ("l", "Low"), ("c", "Close"))}
-        adj = float(row["Adj Close"])
-        if not math.isfinite(adj) or adj <= 0 or values["c"] <= 0:
-            raise ValueError("复权价格无效：" + date)
-        factor = adj/values["c"]
-        bars.append({"date": date, **{k: v*factor for k, v in values.items()}})
-        raw.append({"日期": date, "开盘价": values["o"], "最高价": values["h"], "最低价": values["l"], "收盘价": values["c"], "复权收盘价": adj, "复权因子": factor, "成交量": float(row.get("Volume", 0)), "现金分红": float(row.get("Dividends", 0)), "拆股倍数": float(row.get("Stock Splits", 0))})
+        adj = float(row.get("Adj Close", float("nan")))
+        if not math.isfinite(adj) or adj <= 0:
+            pending_tail.append(date)
+            adj = None
+        bars.append({"date": date, **{k: round(v, 6) for k, v in values.items()}})
+        raw.append({"日期": date, "开盘价": values["o"], "最高价": values["h"], "最低价": values["l"], "收盘价": values["c"], "参考复权收盘价": adj, "成交量": float(row.get("Volume", 0)), "现金分红": float(row.get("Dividends", 0)), "拆股倍数": float(row.get("Stock Splits", 0))})
+    source = "Yahoo Finance公开拆股调整OHLC，经yfinance读取"
+    comparison = None
+    if ticker.endswith(".KS"):
+        if any(r["拆股倍数"] not in (0, 1) for r in raw):
+            raise ValueError("韩股窗口内出现拆股，备用源价格口径需单独核对，暂停该标的")
+        code = ticker.split('.')[0]
+        url = "https://fchart.stock.naver.com/sise.nhn?symbol="+code+"&timeframe=day&count=1800&requestType=0"
+        request = Request(url, headers={"User-Agent": "MstockResearch/1.0"})
+        payload = urlopen(request, timeout=30).read()
+        root = ET.fromstring(payload)
+        local_bars = []
+        for item in root.iter('item'):
+            fields = item.attrib.get('data', '').split('|')
+            if len(fields) < 6:
+                continue
+            stamp = fields[0]
+            day = stamp[:4]+'-'+stamp[4:6]+'-'+stamp[6:8]
+            if protocol["数据请求起点"] <= day <= cutoff:
+                local_bars.append({"date": day, **dict(zip(('o','h','l','c'), map(float, fields[1:5])))})
+        local_bars.sort(key=lambda b:b['date'])
+        check_bars(local_bars)
+        if len(local_bars) < 100:
+            raise ValueError("韩股备用源没有足够可校验历史，未拼接或补值")
+        by_date = {b['date']:b for b in bars}
+        recent = [b for b in local_bars if b['date'] in by_date][-20:]
+        mismatches = [b['date'] for b in recent if abs(b['c']/by_date[b['date']]['c']-1)>1e-5]
+        if len(recent)<10 or mismatches:
+            raise ValueError("韩股两源最近收盘口径未一致："+','.join(mismatches))
+        comparison = {"对照来源": "Yahoo Finance", "最近对照日期数": len(recent), "收盘差异日期": mismatches, "原始备用源SHA256": hashlib.sha256(payload).hexdigest()}
+        source = "Naver公开历史OHLC；最近20个交集日期与Yahoo收盘交叉核对"
+        bars = local_bars
     check_bars(bars)
     if len(bars) < 65:
         raise ValueError("有效完整日线少于65根，无法做本协议的指标预热与评估")
@@ -287,8 +312,11 @@ def get_data(asset, protocol, raw_directory):
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(raw[0]))
         writer.writeheader(); writer.writerows(raw)
+    used_path = raw_directory / (ticker + "_实际分析输入.csv")
+    with used_path.open("w",encoding="utf-8",newline="") as f:
+        writer=csv.DictWriter(f,fieldnames=['date','o','h','l','c']);writer.writeheader();writer.writerows(bars)
     precision_count = sum(b["l"] > min(b["o"], b["c"]) or b["h"] < max(b["o"], b["c"]) for b in bars)
-    audit = {"来源": "Yahoo Finance公开行情，经yfinance读取", "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "尾部复权字段未就绪而隔离的日期": pending_tail, "微小价格精度差行数": precision_count, "精度容差": "仅容许相对价格一千万分之一的浮点误差，未改写OHLC；超限继续失败", "复权口径": "OHLC乘以复权收盘价除以名义收盘价，包含分红调整；非真实账户现金记账", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
+    audit = {"来源": source, "读取库版本": yf.__version__, "获取时间": datetime.now(timezone.utc).isoformat(), "原始市场时区": str(frame.index.tz), "频率": "日线", "原始输入校验SHA256": hashlib.sha256(path.read_bytes()).hexdigest(), "实际分析输入SHA256": hashlib.sha256(used_path.read_bytes()).hexdigest(), "备用源对照": comparison, "行数": len(bars), "首日": bars[0]["date"], "末日": bars[-1]["date"], "按上市日期及收盘上限剔除行数": excluded, "未使用的分红复权字段异常日期": pending_tail, "微小价格精度差行数": precision_count, "精度容差": "相对价格一千万分之一；实际OHLC保留六位小数，超限继续失败", "收益口径": "同一来源OHLC的价格收益，不计现金分红和汇率损益；不同于前两轮分红再投复权结果，禁止混用", "成交量说明": "留存用于校验，未解决跨来源量差异，当前规则不使用成交量作为信号"}
     return bars, audit
 
 
@@ -303,7 +331,7 @@ def markdown_report(report):
         expected = "—" if s["每次平均净收益"] is None else f"{s['每次平均净收益']:.2%}"
         interval = "—" if not s["完成次数"] else f"{s['胜率95%区间'][0]:.1%}–{s['胜率95%区间'][1]:.1%}"
         lines.append(f"| {item['代码']} | {item['原始样本数']} | {s['完成次数']} | {rate} | {interval} | {expected} | {item['状态']} |")
-    lines += ["", "## 阅读边界", "", "- 同公司不同市场不合并为独立胜率样本；分标的、分环境报告。", "- 训练2021至2022年，验证2023年，历史留出2024年至已完成日期。上市较晚者缺少训练验证时仅报告预设基线。", "- 选择股票时已知当前标的和近期行情，存在选择偏差；历史留出不能替代未来模拟观察。", "- 股息复权、成本、成交顺序均为明确研究假设，不能把结果称作真实账户收益。", "- 成本加倍只重估同一批完成记录，不虚报压力情况下的回撤。", "- 原始行情仅留在运行器临时目录，公开产物不包含整套行情缓存。", "- 不自动交易，不生成券商指令，不因不足80%就反复尝试新参数。"]
+    lines += ["", "## 阅读边界", "", "- 同公司不同市场不合并为独立胜率样本；分标的、分环境报告。", "- 训练2021至2022年，验证2023年，历史留出2024年至已完成日期。上市较晚者缺少训练验证时仅报告预设基线。", "- 选择股票时已知当前标的和近期行情，存在选择偏差；历史留出不能替代未来模拟观察。", "- 价格收益口径、成本、成交顺序均为明确研究假设，不能把结果称作真实账户收益。", "- 成本加倍只重估同一批完成记录，不虚报压力情况下的回撤。", "- 原始行情仅留在运行器临时目录，公开产物不包含整套行情缓存。", "- 不自动交易，不生成券商指令，不因不足80%就反复尝试新参数。"]
     return "\n".join(lines)+"\n"
 
 
